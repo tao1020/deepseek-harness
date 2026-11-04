@@ -1,0 +1,11 @@
+- tree "Sessions":
+  - group "Pinned":
+    - text: Pinned
+    - treeitem "A pinned 1min Pinned":
+      - text: A pinned 1min
+      - img "Pinned"
+    - treeitem "B pinned now Pinned":
+      - text: B pinned now
+      - img "Pinned"
+  - treeitem "Workspace A"
+  - treeitem "Workspace B"

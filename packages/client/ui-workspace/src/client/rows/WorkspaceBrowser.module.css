@@ -647,3 +647,19 @@
     transition: none;
   }
 }
+
+.pinSectionHeader {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  height: var(--workspace-toolbar-height);
+  padding-inline: var(--dsh-sidebar-row-padding);
+  color: var(--dsw-alias-label-tertiary);
+}
+
+/* Membership drops highlight the header, not a positional insertion boundary. */
+.pinDropTarget {
+  border-radius: var(--dsw-radius-sm);
+  background: var(--dsw-alias-interactive-bg-hover);
+  outline: 1px solid var(--dsw-alias-state-business-primary);
+}

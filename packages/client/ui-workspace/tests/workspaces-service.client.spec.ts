@@ -585,7 +585,7 @@ describe('UiWorkspaceService', () => {
     expect(b.sessions.retain).toHaveBeenCalledExactlyOnceWith(sid('chosen'), { source: 'mainView' })
   })
 
-  it('pins on the Host, then leads the Session in its group and flat saved orders; unpin leaves them', async () => {
+  it('pins on the Host, fronts only the flat order, and preserves the original group slot', async () => {
     const b = bench({
       workspaces: workspaceState([workspace(wid('a'), [sid('one'), sid('two'), sid('three')])]),
       sessions: sessionState([summary('one', { updatedAt: 3 }), summary('two', { updatedAt: 2 }), summary('three', { updatedAt: 1 })]),
@@ -594,17 +594,17 @@ describe('UiWorkspaceService', () => {
     await b.uiWorkspace.pinSession(sid('three'))
     expect(b.workspaces.pinCalls).toEqual([sid('three')])
     expect(b.view.getSnapshot().sessionOrderByAccount).toMatchObject({
-      a: ['three', 'one', 'two'],
+      a: ['one', 'two', 'three'],
       [FLAT_SESSION_ORDER_KEY]: ['three', 'one', 'two'],
     })
     // Unpin is a Host fact only: the saved positions do not move.
     await b.uiWorkspace.unpinSession(sid('three'))
     expect(b.workspaces.unpinCalls).toEqual([sid('three')])
-    expect(b.view.getSnapshot().sessionOrderByAccount.a).toEqual(['three', 'one', 'two'])
+    expect(b.view.getSnapshot().sessionOrderByAccount.a).toEqual(['one', 'two', 'three'])
     // A rejected pin writes no order.
     b.workspaces.onPin = async () => { throw new Error('pin failed') }
     await expect(b.uiWorkspace.pinSession(sid('one'))).rejects.toThrow('pin failed')
-    expect(b.view.getSnapshot().sessionOrderByAccount.a).toEqual(['three', 'one', 'two'])
+    expect(b.view.getSnapshot().sessionOrderByAccount.a).toEqual(['one', 'two', 'three'])
   })
 
   it('keeps newer saved orders when a pending pin completes', async () => {
@@ -621,7 +621,7 @@ describe('UiWorkspaceService', () => {
     pending.resolve(undefined)
     await pin
     expect(b.view.getSnapshot().sessionOrderByAccount).toMatchObject({
-      a: ['three', 'two', 'one'],
+      a: ['two', 'one', 'three'],
       [FLAT_SESSION_ORDER_KEY]: ['three', 'two', 'one'],
     })
   })
@@ -640,7 +640,7 @@ describe('UiWorkspaceService', () => {
     await pin
     expect(b.view.getSnapshot().sessionOrderByAccount).not.toHaveProperty('a')
     expect(b.view.getSnapshot().sessionOrderByAccount).toMatchObject({
-      [UNGROUPED_KEY]: ['two', 'one'],
+      [UNGROUPED_KEY]: ['one', 'two'],
       [FLAT_SESSION_ORDER_KEY]: ['two', 'one'],
     })
   })
@@ -655,7 +655,7 @@ describe('UiWorkspaceService', () => {
     b.sessions.list.set(sessionState([summary('one', { updatedAt: 3 }), summary('three', { updatedAt: 1 })]))
     await b.uiWorkspace.pinSession(sid('three'))
     expect(b.view.getSnapshot().orderBy).toBe('updated')
-    expect(b.view.getSnapshot().sessionOrderByAccount.a).toEqual(['three', 'one', 'two'])
+    expect(b.view.getSnapshot().sessionOrderByAccount.a).toEqual(['one', 'two', 'three'])
   })
 
   it('reuses only an unarchived member blank and coalesces concurrent creation', async () => {

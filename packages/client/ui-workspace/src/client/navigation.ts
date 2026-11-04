@@ -22,8 +22,8 @@ import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
 import type { DraftInitializationOptions } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type { RowToast } from './contract/slots.ts'
-import { pinOrderAccounts, pinOrderSource } from './pin-order.ts'
-import type { WorkspaceViewStoreActions } from './stores.ts'
+import { pinOrderSource } from './pin-order.ts'
+import { FLAT_SESSION_ORDER_KEY, type WorkspaceViewStoreActions } from './stores.ts'
 
 interface MainSelection {
   readonly sessionId?: SessionId
@@ -393,7 +393,7 @@ class UiWorkspaceService extends Service implements UiWorkspace {
     const { items, pinnedSessionIds, archivedSessionIds } = this.workspaces.list.getSnapshot()
     this.view.pinSessionOrder(
       sessionId,
-      pinOrderAccounts(items, sessionId),
+      [FLAT_SESSION_ORDER_KEY],
       pinOrderSource(items, this.sessions.list.getSnapshot(), { pinnedSessionIds, archivedSessionIds }),
     )
   }

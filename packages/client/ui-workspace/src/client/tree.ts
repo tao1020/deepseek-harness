@@ -414,7 +414,7 @@ function sessionNode(
  *
  * Every group shows, except that the archived-only filter drops groups
  * without visible members; sessions populate under expanded groups with
- * pinned rows leading in the selected local order. Blank sessions are
+ * active pinned rows omitted for the global pinned section. Blank sessions are
  * excluded except for the selected provisional New Session row; archived
  * sessions keep their slots and appear per the archived filter. Content
  * search lives outside this derivation (see {@link deriveSearchResults}).
@@ -453,6 +453,7 @@ export function deriveGroups(
       containsCurrent: g.key === currentGroup,
       sessions: expanded
         ? sectionMembers(g.sessions, pinned, archived)
+          .filter(session => !pinned.has(session.id) || archived.has(session.id))
           .map(session => sessionNode(session, list, statuses, pinned, archived))
         : [],
     })

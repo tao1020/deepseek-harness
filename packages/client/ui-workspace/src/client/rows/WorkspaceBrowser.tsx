@@ -14,7 +14,7 @@
  * are slot entries with their own behavior, so this component threads no
  * action callbacks and hosts no action surface.
  */
-import { type CSSProperties, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { type CSSProperties, type DragEvent as ReactDragEvent, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import clsx from 'clsx'
 import { WorkspaceDialogs } from './WorkspaceDialogs.tsx'
 import {
@@ -238,6 +238,56 @@ function sessionDragOrder(
   return pinCurrentBlank(next, rows.find(row => row.blank)?.id)
 }
 
+/** A pin drop waits for the Host result; rows move only with the authoritative snapshot. */
+function usePinDrop(
+  list: SessionListState,
+  rowState: SessionRowState,
+  setSessionPinned: WorkspaceBrowserProps['setSessionPinned'],
+  workspaceReady: boolean,
+) {
+  const [pending, setPending] = useState(false)
+  const busy = useRef(false)
+  const [target, setTarget] = useState<string | null>(null)
+  const eligible = (drag: DragState | null): drag is DragState => {
+    if (drag === null || busy.current || !workspaceReady || list.phase !== 'ready') return false
+    const session = list.byId[drag.sessionId]
+    return session !== undefined && !session.blank && session.origin !== 'subagent'
+      && !rowState.archivedSessionIds.includes(drag.sessionId)
+      && rowState.pinnedSessionIds.includes(drag.sessionId) === drag.pinned
+  }
+  const drop = (drag: DragState, pinned: boolean): void => {
+    setTarget(null)
+    if (!eligible(drag)) return
+    busy.current = true
+    setPending(true)
+    void setSessionPinned(drag.sessionId, pinned).finally(() => {
+      busy.current = false
+      setPending(false)
+    })
+  }
+  const headerProps = (drag: DragState | null, key: string, pinned: boolean, hover: () => void, commit: () => void) => {
+    const active = eligible(drag) && drag.pinned !== pinned
+    return {
+      className: clsx(active && target === key && css.pinDropTarget),
+      onDragOver: active ? (event: ReactDragEvent<HTMLDivElement>) => {
+        event.preventDefault()
+        event.stopPropagation()
+        event.dataTransfer.dropEffect = 'move'
+        setTarget(key)
+        hover()
+      } : undefined,
+      onDragLeave: () => { setTarget(null) },
+      onDrop: active ? (event: ReactDragEvent<HTMLDivElement>) => {
+        event.preventDefault()
+        event.stopPropagation()
+        commit()
+        drop(drag, pinned)
+      } : undefined,
+    }
+  }
+  return { pending, headerProps }
+}
+
 /** In-flight Workspace-row drag: source identity plus the current marker. */
 interface WorkspaceDragState {
   workspaceId: WorkspaceId
@@ -253,7 +303,7 @@ function workspaceGroupHalf(e: { clientY: number; currentTarget: HTMLElement }):
 type SessionTreeProps = Pick<
   WorkspaceBrowserProps,
   'useSessionStatus' | 'startSession' | 'open' | 'openSessionMenu' | 'openWorkspaceMenu' | 'useContextMenuTarget' | 'useContextMenu'
-  | 'insertWorkspaceBefore' | 't' | 'usePanelInfo'
+  | 'insertWorkspaceBefore' | 'setSessionPinned' | 't' | 'usePanelInfo'
   | 'useRemoteAccess' | 'useSessionAccess' | 'useWorkspaceAccess'
 > & PropsRenderSlots<
   | 'sidebar.workspaces.session.row.action'
@@ -270,6 +320,8 @@ type SessionTreeProps = Pick<
   workspaces: readonly WorkspaceView[]
   /** Browser-projected order for Sessions outside every Workspace. */
   ungroupedSessionIds: readonly SessionId[]
+  /** Complete flat account order, shared by global pins in every grouping mode. */
+  flatSessionIds: readonly SessionId[]
   /** Whether the current Workspace stream has a complete Host baseline. */
   workspaceReady: boolean
   /** Grouping, ordering, and filter changes replace the view without row motion. */
@@ -312,14 +364,14 @@ function EmptySessions({ rowState, onLeaveArchivedOnly, t }: Pick<SessionTreePro
 
 /** The scrolling session tree; unmounting drops the sessions subscription and the session watermarks. */
 function SessionTree({
-  list, useSessionStatus, startSession, open, workspaces, ungroupedSessionIds,
+  list, useSessionStatus, startSession, open, workspaces, ungroupedSessionIds, flatSessionIds,
   rowState, onLeaveArchivedOnly,
   workspaceReady, animationResetKey, usePanelInfo, useRemoteAccess, useSessionAccess, useWorkspaceAccess,
   onSessionRenameRequest,
   renderSlot, openSessionMenu, openWorkspaceMenu, useContextMenuTarget, useContextMenu,
   insertWorkspaceBefore,
   nestWorkspaces, groupExpansion, setGroupExpanded,
-  setSessionOrder, home, t,
+  setSessionOrder, setSessionPinned, home, t,
   revealSessionId, onSessionRevealed, shortcuts,
 }: SessionTreeProps) {
   const panelActive = usePanelInfo(info => info.activePanelId !== null)
@@ -327,7 +379,13 @@ function SessionTree({
   const current = panelActive
     ? undefined
     : Object.values(list.byId).find(session => (session.retainedBy.mainView ?? 0) > 0)?.id
-  const revealGroup = revealSessionId === undefined || !workspaceReady
+  const globalRows = useMemo(
+    () => deriveFlat(list, flatSessionIds, rowState, statuses),
+    [list, flatSessionIds, rowState, statuses],
+  )
+  const pinnedRows = useMemo(() => globalRows.filter(row => row.pinned), [globalRows])
+  const showPinHeader = globalRows.some(row => !row.blank && !row.archived)
+  const revealGroup = revealSessionId === undefined || !workspaceReady || pinnedRows.some(row => row.id === revealSessionId)
     ? undefined
     : owningGroupKey(workspaces, revealSessionId)
   // Per-group raised watermarks; an absent key means the base watermark.
@@ -336,12 +394,13 @@ function SessionTree({
   const [watermarkMotionKey, setWatermarkMotionKey] = useState(0)
   // Transient drag marker state; the selected mode owns the resulting order.
   const [drag, setDrag] = useState<DragState | null>(null)
+  const pinDrop = usePinDrop(list, rowState, setSessionPinned, workspaceReady)
   const sessionDropCommitted = useRef(false)
   const [workspaceDrag, setWorkspaceDrag] = useState<WorkspaceDragState | null>(null)
   const workspaceDropCommitted = useRef(false)
   const nativeDragActive = drag !== null || workspaceDrag !== null
   useNativeDragAcceptance(nativeDragActive)
-  const currentGroup = current === undefined || !workspaceReady
+  const currentGroup = current === undefined || !workspaceReady || pinnedRows.some(row => row.id === current)
     ? undefined
     : owningGroupKey(workspaces, current)
   useEffect(() => {
@@ -416,6 +475,11 @@ function SessionTree({
     if (sessionDropCommitted.current) return
     sessionDropCommitted.current = true
     setDrag(null)
+    if (activeDrag.accountKey === FLAT_SESSION_ORDER_KEY) {
+      const nextOrder = sessionDragOrder(flatSessionIds, pinnedRows, activeDrag, over)
+      if (nextOrder !== undefined) setSessionOrder(FLAT_SESSION_ORDER_KEY, nextOrder)
+      return
+    }
     const group = groups.find(candidate => candidate.key === activeDrag.accountKey)
     if (group === undefined) return
     if (over.id === activeDrag.sessionId) return
@@ -468,7 +532,66 @@ function SessionTree({
     && workspaceDrag?.over?.id === rootGroups[0].workspaceId
     && workspaceDrag.over.half === 'before'
 
-  const rowKeys: string[] = groups.length === 0 ? ['empty'] : []
+  const pinHeaderProps = (key: string, pinned: boolean) => pinDrop.headerProps(
+    drag !== null && (pinned || owningGroupKey(workspaces, drag.sessionId) === key) ? drag : null,
+    key,
+    pinned,
+    () => { setDrag(active => active === null ? null : { ...active, over: null }) },
+    () => { sessionDropCommitted.current = true; setDrag(null) },
+  )
+  const renderSession = (node: SessionNode, accountKey: string): ReactNode => {
+    const sameGroupDrag = drag !== null && drag.accountKey === accountKey
+    const compatibleTarget = sameGroupDrag && drag.pinned === node.pinned
+    const normalizeHalf = (half: 'before' | 'after'): 'before' | 'after' =>
+      node.blank ? 'after' : half
+    const dragProps = {
+      start: () => {
+        sessionDropCommitted.current = false
+        setDrag({ accountKey, sessionId: node.id, pinned: node.pinned, over: null })
+      },
+      active: compatibleTarget,
+      marker: sameGroupDrag && drag.over?.id === node.id ? drag.over.half : null,
+      hover: (half: 'before' | 'after') => {
+      /* v8 ignore next -- narrowing guard: Rows gates hover on `active`, which is false while the drag state is null. */
+        setDrag(d => (d === null ? d : {
+          ...d, over: { id: node.id, half: normalizeHalf(half) },
+        }))
+      },
+      drop: (half: 'before' | 'after') => {
+      /* v8 ignore next -- narrowing guard: Rows gates drop on `active`, which is false while the drag state is null. */
+        if (drag === null) return
+        commitSessionDrag(drag, { id: node.id, half: normalizeHalf(half) })
+      },
+      end: () => {
+        if (drag?.over !== null && drag?.over !== undefined) commitSessionDrag(drag, drag.over)
+        else setDrag(null)
+        sessionDropCommitted.current = false
+      },
+    }
+    return (
+      <SessionNodeItem
+        key={node.id}
+        node={node}
+        currentId={current}
+        now={now}
+        onOpen={open}
+        onRenameRequest={onSessionRenameRequest}
+        renderSlot={renderSlot}
+        openSessionMenu={openSessionMenu} useContextMenu={useContextMenu}
+        useContextMenuTarget={useContextMenuTarget}
+        onReveal={node.id === revealSessionId
+          ? () => { onSessionRevealed(node.id) }
+          : undefined}
+        drag={pinDrop.pending ? undefined : dragProps}
+        home={home}
+        useSessionAccess={useSessionAccess}
+        t={t}
+      />
+    )
+  }
+
+  const rowKeys: string[] = pinnedRows.map(row => `session:${row.id}`)
+  if (groups.length === 0 && pinnedRows.length === 0) rowKeys.push('empty')
   const renderGroup = (group: GroupNode, depth: number): ReactNode => {
     const workspaceId = group.workspaceId
     const children = childrenByParent.get(group.key) ?? []
@@ -551,84 +674,35 @@ function SessionTree({
             }
           }}
       >
-        <ProjectRowItem
-          newShortcut={shortcuts.find(row => row.id === 'session.new')}
-          group={group}
-          openWorkspaceMenu={openWorkspaceMenu} useContextMenu={useContextMenu} useContextMenuTarget={useContextMenuTarget}
-          useRemoteAccess={useRemoteAccess}
-          useWorkspaceAccess={useWorkspaceAccess}
-          containsCurrentDescendant={currentAncestors.has(group.key)}
-          home={home}
-          t={t}
-          onToggle={() => {
-            if (group.expanded) dropWatermarks(key => withinGroup(key, group.key))
-            setGroupExpanded(group.key, !group.expanded)
-          }}
-          onCreate={() => {
-            if (group.workspaceId !== undefined) {
-              setGroupExpanded(group.key, true)
-              startSession(group.workspaceId)
-            }
-          }}
-          drag={workspaceDragProps}
-        />
+        <div data-pin-drop-group={group.key} {...pinHeaderProps(group.key, false)}>
+          <ProjectRowItem
+            newShortcut={shortcuts.find(row => row.id === 'session.new')}
+            group={group}
+            openWorkspaceMenu={openWorkspaceMenu} useContextMenu={useContextMenu} useContextMenuTarget={useContextMenuTarget}
+            useRemoteAccess={useRemoteAccess}
+            useWorkspaceAccess={useWorkspaceAccess}
+            containsCurrentDescendant={currentAncestors.has(group.key)}
+            home={home}
+            t={t}
+            onToggle={() => {
+              if (group.expanded) dropWatermarks(key => withinGroup(key, group.key))
+              setGroupExpanded(group.key, !group.expanded)
+            }}
+            onCreate={() => {
+              if (group.workspaceId !== undefined) {
+                setGroupExpanded(group.key, true)
+                startSession(group.workspaceId)
+              }
+            }}
+            drag={workspaceDragProps}
+          />
+        </div>
         {childRows.length > 0 && (
           <div role="group">
             {childRows}
           </div>
         )}
-        {sessions.map((node) => {
-        // Session drag never leaves its browser-local account, and pinned
-        // rows reorder only within their leading pinned block.
-          const sameGroupDrag = drag !== null && drag.accountKey === group.key
-          const compatibleTarget = sameGroupDrag && drag.pinned === node.pinned
-          const normalizeHalf = (half: 'before' | 'after'): 'before' | 'after' =>
-            node.blank ? 'after' : half
-          const dragProps = {
-            start: () => {
-              sessionDropCommitted.current = false
-              setDrag({ accountKey: group.key, sessionId: node.id, pinned: node.pinned, over: null })
-            },
-            active: compatibleTarget,
-            marker: sameGroupDrag && drag.over?.id === node.id ? drag.over.half : null,
-            hover: (half: 'before' | 'after') => {
-            /* v8 ignore next -- narrowing guard: Rows gates hover on `active`, which is false while the drag state is null. */
-              setDrag(d => (d === null ? d : {
-                ...d, over: { id: node.id, half: normalizeHalf(half) },
-              }))
-            },
-            drop: (half: 'before' | 'after') => {
-            /* v8 ignore next -- narrowing guard: Rows gates drop on `active`, which is false while the drag state is null. */
-              if (drag === null) return
-              commitSessionDrag(drag, { id: node.id, half: normalizeHalf(half) })
-            },
-            end: () => {
-              if (drag?.over !== null && drag?.over !== undefined) commitSessionDrag(drag, drag.over)
-              else setDrag(null)
-              sessionDropCommitted.current = false
-            },
-          }
-          return (
-            <SessionNodeItem
-              key={node.id}
-              node={node}
-              currentId={current}
-              now={now}
-              onOpen={open}
-              onRenameRequest={onSessionRenameRequest}
-              renderSlot={renderSlot}
-              openSessionMenu={openSessionMenu} useContextMenu={useContextMenu}
-              useContextMenuTarget={useContextMenuTarget}
-              onReveal={node.id === revealSessionId && group.key === revealGroup
-                ? () => { onSessionRevealed(node.id) }
-                : undefined}
-              drag={dragProps}
-              home={home}
-              useSessionAccess={useSessionAccess}
-              t={t}
-            />
-          )
-        })}
+        {sessions.map(node => renderSession(node, group.key))}
         {collapsed.hiddenCount > 0 && (
           <button
             type="button"
@@ -668,7 +742,15 @@ function SessionTree({
         ready={list.phase === 'ready' && workspaceReady && !nativeDragActive}
         resetKey={JSON.stringify([animationResetKey, watermarkMotionKey])}
       >
-        {groups.length === 0 && (
+        {showPinHeader && (
+          <div role="group" aria-label={t('row.pinned')} data-pinned-section className={css.groupSection}>
+            <div {...pinHeaderProps(FLAT_SESSION_ORDER_KEY, true)} data-pin-drop-header>
+              <div className={css.pinSectionHeader}>{t('row.pinned')}</div>
+            </div>
+            {pinnedRows.map(node => renderSession(node, FLAT_SESSION_ORDER_KEY))}
+          </div>
+        )}
+        {groups.length === 0 && pinnedRows.length === 0 && (
           <EmptySessions rowState={rowState} onLeaveArchivedOnly={onLeaveArchivedOnly} t={t} />
         )}
         {groupRows}
@@ -680,7 +762,7 @@ function SessionTree({
 /** The flat "In one list" body: every session is one draggable top-level row. */
 function FlatList({
   list, sessionIds, rowState, onLeaveArchivedOnly, useSessionStatus, useSessionAccess, open, onSessionRenameRequest,
-  usePanelInfo, setSessionOrder, workspaceReady, animationResetKey,
+  usePanelInfo, setSessionOrder, setSessionPinned, workspaceReady, animationResetKey,
   revealSessionId, onSessionRevealed, renderSlot, openSessionMenu, useContextMenuTarget, useContextMenu, home, t,
 }: Pick<
   SessionTreeProps,
@@ -692,6 +774,7 @@ function FlatList({
   | 'openSessionMenu' | 'useContextMenuTarget' | 'useContextMenu'
   | 'usePanelInfo'
   | 'setSessionOrder'
+  | 'setSessionPinned'
   | 'workspaceReady'
   | 'animationResetKey'
   | 'revealSessionId'
@@ -711,6 +794,7 @@ function FlatList({
     [list, sessionIds, rowState, statuses],
   )
   const [drag, setDrag] = useState<DragState | null>(null)
+  const pinDrop = usePinDrop(list, rowState, setSessionPinned, workspaceReady)
   const dropCommitted = useRef(false)
   useNativeDragAcceptance(drag !== null)
   const currentId = panelActive
@@ -724,6 +808,70 @@ function FlatList({
     if (nextOrder !== undefined) setSessionOrder(FLAT_SESSION_ORDER_KEY, nextOrder)
   }
   const now = Date.now()
+  const showPinHeaders = rows.some(row => !row.blank && !row.archived)
+  const renderPinHeader = (pinned: boolean): ReactNode => {
+    const props = pinDrop.headerProps(
+      drag,
+      pinned ? FLAT_SESSION_ORDER_KEY : UNGROUPED_KEY,
+      pinned,
+      () => { setDrag(active => active === null ? null : { ...active, over: null }) },
+      () => { dropCommitted.current = true; setDrag(null) },
+    )
+    return (
+      <div
+        {...props}
+        data-pin-drop-header={pinned ? '' : undefined}
+        data-pin-drop-group={pinned ? undefined : UNGROUPED_KEY}
+        className={clsx(css.pinSectionHeader, props.className)}
+      >{t(pinned ? 'row.pinned' : 'section.sessions')}</div>
+    )
+  }
+  const renderSession = (node: SessionNode): ReactNode => {
+    const active = drag !== null && drag.pinned === node.pinned
+    const normalizeHalf = (half: 'before' | 'after'): 'before' | 'after' =>
+      node.blank ? 'after' : half
+    return (
+      <SessionNodeItem
+        key={node.id}
+        node={node}
+        currentId={currentId}
+        now={now}
+        onOpen={open}
+        onRenameRequest={onSessionRenameRequest}
+        renderSlot={renderSlot}
+        openSessionMenu={openSessionMenu} useContextMenu={useContextMenu}
+        useContextMenuTarget={useContextMenuTarget}
+        onReveal={node.id === revealSessionId
+          ? () => { onSessionRevealed(node.id) }
+          : undefined}
+        useSessionAccess={useSessionAccess}
+        drag={pinDrop.pending ? undefined : {
+          start: () => {
+            dropCommitted.current = false
+            setDrag({ accountKey: FLAT_SESSION_ORDER_KEY, sessionId: node.id, pinned: node.pinned, over: null })
+          },
+          active,
+          marker: active && drag.over?.id === node.id ? drag.over.half : null,
+          hover: (half) => {
+            setDrag(current => current === null ? current : {
+              ...current, over: { id: node.id, half: normalizeHalf(half) },
+            })
+          },
+          drop: (half) => {
+            if (drag !== null) commitDrag(drag, { id: node.id, half: normalizeHalf(half) })
+          },
+          end: () => {
+            if (drag?.over !== null && drag?.over !== undefined) commitDrag(drag, drag.over)
+            else setDrag(null)
+            dropCommitted.current = false
+          },
+        }}
+        home={home}
+        t={t}
+      />
+    )
+  }
+
   return (
     <HoverCardGroup className={clsx(css.treeBody, css.wide)}>
       <AnimatedRows
@@ -737,51 +885,14 @@ function FlatList({
         {rows.length === 0 && (
           <EmptySessions rowState={rowState} onLeaveArchivedOnly={onLeaveArchivedOnly} t={t} />
         )}
-        {rows.map((node) => {
-          const active = drag !== null && drag.pinned === node.pinned
-          const normalizeHalf = (half: 'before' | 'after'): 'before' | 'after' =>
-            node.blank ? 'after' : half
-          return (
-            <SessionNodeItem
-              key={node.id}
-              node={node}
-              currentId={currentId}
-              now={now}
-              onOpen={open}
-              onRenameRequest={onSessionRenameRequest}
-              renderSlot={renderSlot}
-              openSessionMenu={openSessionMenu} useContextMenu={useContextMenu}
-              useContextMenuTarget={useContextMenuTarget}
-              onReveal={node.id === revealSessionId
-                ? () => { onSessionRevealed(node.id) }
-                : undefined}
-              useSessionAccess={useSessionAccess}
-              drag={{
-                start: () => {
-                  dropCommitted.current = false
-                  setDrag({ accountKey: FLAT_SESSION_ORDER_KEY, sessionId: node.id, pinned: node.pinned, over: null })
-                },
-                active,
-                marker: active && drag.over?.id === node.id ? drag.over.half : null,
-                hover: (half) => {
-                  setDrag(current => current === null ? current : {
-                    ...current, over: { id: node.id, half: normalizeHalf(half) },
-                  })
-                },
-                drop: (half) => {
-                  if (drag !== null) commitDrag(drag, { id: node.id, half: normalizeHalf(half) })
-                },
-                end: () => {
-                  if (drag?.over !== null && drag?.over !== undefined) commitDrag(drag, drag.over)
-                  else setDrag(null)
-                  dropCommitted.current = false
-                },
-              }}
-              home={home}
-              t={t}
-            />
-          )
-        })}
+        {showPinHeaders && (
+          <div role="group" aria-label={t('row.pinned')} data-pinned-section className={css.groupSection}>
+            {renderPinHeader(true)}
+            {rows.filter(row => row.pinned).map(renderSession)}
+          </div>
+        )}
+        {showPinHeaders && renderPinHeader(false)}
+        {rows.filter(row => !row.pinned).map(renderSession)}
       </AnimatedRows>
     </HoverCardGroup>
   )
@@ -912,7 +1023,7 @@ export function WorkspaceBrowser({
   notifyArchivedNotOpenable,
   renameWorkspace, useWorkspaceActionRequest, settleWorkspaceAction,
   deleteWorkspace,
-  insertWorkspaceBefore,
+  insertWorkspaceBefore, setSessionPinned,
   unarchiveSession,
   createWorkspace,
   searchSessions,
@@ -989,11 +1100,12 @@ export function WorkspaceBrowser({
     [orderState, archivedFilter],
   )
   const flatMemberIds = useMemo(() => sessionMemberIds(list), [list])
+  const groupOrderState = useMemo(() => ({ pinnedSessionIds: [], archivedSessionIds }), [archivedSessionIds])
   const orderedWorkspaces = useMemo(() => workspaces.map((workspace) => {
     const memberIds = workspace.sessionIds
     const baseOrder = orderBy === 'updated'
       ? orderByRecency(memberIds, list.byId)
-      : reconcileManualOrder(memberIds, sessionOrderByAccount[workspace.workspaceId], list.byId, orderState)
+      : reconcileManualOrder(memberIds, sessionOrderByAccount[workspace.workspaceId], list.byId, groupOrderState)
     return {
       ...workspace,
       sessionIds: pinCurrentBlank(
@@ -1001,16 +1113,16 @@ export function WorkspaceBrowser({
         currentBlank !== undefined && memberIds.includes(currentBlank) ? currentBlank : undefined,
       ),
     }
-  }), [currentBlank, list.byId, orderBy, orderState, sessionOrderByAccount, workspaces])
+  }), [currentBlank, list.byId, orderBy, groupOrderState, sessionOrderByAccount, workspaces])
   const orderedUngroupedSessionIds = useMemo(() => {
     const baseOrder = orderBy === 'updated'
       ? orderByRecency(ungroupedMemberIds, list.byId)
-      : reconcileManualOrder(ungroupedMemberIds, sessionOrderByAccount[UNGROUPED_KEY], list.byId, orderState)
+      : reconcileManualOrder(ungroupedMemberIds, sessionOrderByAccount[UNGROUPED_KEY], list.byId, groupOrderState)
     return pinCurrentBlank(
       baseOrder,
       currentBlank !== undefined && ungroupedMemberIds.includes(currentBlank) ? currentBlank : undefined,
     )
-  }, [currentBlank, list.byId, orderBy, orderState, sessionOrderByAccount, ungroupedMemberIds])
+  }, [currentBlank, list.byId, orderBy, groupOrderState, sessionOrderByAccount, ungroupedMemberIds])
   const orderedFlatSessionIds = useMemo(() => {
     const baseOrder = orderBy === 'updated'
       ? orderByRecency(flatMemberIds, list.byId)
@@ -1392,6 +1504,7 @@ export function WorkspaceBrowser({
                 openSessionMenu={openSessionMenu} useContextMenu={useContextMenu}
                 useContextMenuTarget={useContextMenuTarget}
                 setSessionOrder={saveSessionOrder}
+                setSessionPinned={setSessionPinned}
                 revealSessionId={revealSessionId}
                 onSessionRevealed={acknowledgeSessionReveal}
                 home={home}
@@ -1414,12 +1527,14 @@ export function WorkspaceBrowser({
                 useContextMenuTarget={useContextMenuTarget}
                 workspaces={orderedWorkspaces}
                 ungroupedSessionIds={orderedUngroupedSessionIds}
+                flatSessionIds={orderedFlatSessionIds}
                 workspaceReady={workspaceReady}
                 nestWorkspaces={groupBy === 'workspace-tree'}
                 animationResetKey={`${groupBy}/${orderBy}/${archivedFilter}`}
                 groupExpansion={groupExpansion}
                 setGroupExpanded={actions.setGroupExpanded}
                 setSessionOrder={saveSessionOrder}
+                setSessionPinned={setSessionPinned}
                 rowState={rowState}
                 onLeaveArchivedOnly={leaveArchivedOnly}
                 startSession={startSession}

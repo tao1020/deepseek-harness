@@ -147,6 +147,7 @@ function mount(overrides: Partial<WorkspaceBrowserProps> = {}) {
     notifyArchivedNotOpenable: vi.fn(),
     renameWorkspace: vi.fn(async () => {}),
     deleteWorkspace: vi.fn(async () => {}),
+    setSessionPinned: vi.fn(async () => {}),
     unarchiveSession: vi.fn(async () => {}),
     insertWorkspaceBefore: vi.fn(async () => {}),
     createWorkspace: vi.fn(async () => workspace('created', [])),
@@ -507,9 +508,9 @@ describe('WorkspaceBrowser', () => {
     expect(screen.getByRole('menuitem', { name: '按工作区' }).querySelector('svg')).toBeTruthy()
     expect(screen.getByRole('menuitem', { name: '手动排序' }).querySelector('svg')).toBeTruthy()
     fireEvent.click(screen.getByRole('menuitem', { name: '单列表' }))
-    // Store-driven flip: title changes, rows flatten newest-first, headers gone.
+    // Store-driven flip: title changes, rows flatten newest-first, Workspace headers disappear.
     expect(b.store.getSnapshot().groupBy).toBe('flat')
-    expect(screen.getByText('会话')).toBeTruthy()
+    expect(within(b.view.container.querySelector<HTMLElement>('[data-sidebar-workspace-header]')!).getByText('会话')).toBeTruthy()
     expect(screen.queryByText('alpha')).toBeNull()
     expect(screen.getByText('alpha-s')).toBeTruthy()
     expect(screen.getByText('beta-s')).toBeTruthy()
@@ -1231,7 +1232,11 @@ describe('WorkspaceBrowser', () => {
       await waitFor(() => { expect(names()).toEqual(['p', 'q', 'b', 'a', 'c']) })
       dragBefore('q', 'p')
       expect(b.store.getSnapshot().sessionOrderByAccount[account])
-        .toEqual(['b', 'a', 'q', 'p', 'kept-archive', 'c', 'missing-archive'])
+        .toEqual(mode === 'flat'
+          ? ['b', 'a', 'q', 'p', 'kept-archive', 'c', 'missing-archive']
+          : ['b', 'a', 'p', 'kept-archive', 'q', 'c', 'missing-archive'])
+      expect(b.store.getSnapshot().sessionOrderByAccount[FLAT_SESSION_ORDER_KEY])
+        .toEqual(expect.arrayContaining(items.map(item => item.id)))
       await waitFor(() => { expect(names()).toEqual(['q', 'p', 'b', 'a', 'c']) })
       b.view.unmount()
 
@@ -2175,7 +2180,7 @@ describe('WorkspaceBrowser', () => {
     expect(b.store.getSnapshot().sessionOrderByAccount.alpha).toEqual(['two', 'one', 'three'])
   })
 
-  it('drags a pinned row by moving its position in the complete Session sequence', () => {
+  it('drags global pins in the complete flat sequence without changing group positions', () => {
     const sessions = sessionState([
       summary('one', 4), summary('two', 3), summary('three', 2), summary('four', 1),
     ])
@@ -2187,7 +2192,7 @@ describe('WorkspaceBrowser', () => {
       )),
     })
     fireEvent.click(screen.getByText('alpha'))
-    expect(screen.getAllByRole('treeitem').slice(1).map(row => row.textContent)).toEqual([
+    expect(screen.getAllByRole('treeitem').filter(row => row.getAttribute('aria-expanded') === null).map(row => row.textContent)).toEqual([
       expect.stringContaining('one'), expect.stringContaining('two'),
       expect.stringContaining('three'), expect.stringContaining('four'),
     ])
@@ -2200,8 +2205,9 @@ describe('WorkspaceBrowser', () => {
     fireDrag(one, 'dragOver', 105)
     fireDrag(one, 'drop', 105)
     fireEvent.dragEnd(two)
-    expect(b.store.getSnapshot().sessionOrderByAccount.alpha).toEqual(['three', 'two', 'one', 'four'])
-    expect(screen.getAllByRole('treeitem').slice(1).map(row => row.textContent)).toEqual([
+    expect(b.store.getSnapshot().sessionOrderByAccount.alpha).toEqual(['three', 'one', 'four', 'two'])
+    expect(b.store.getSnapshot().sessionOrderByAccount[FLAT_SESSION_ORDER_KEY]).toEqual(['two', 'one', 'three', 'four'])
+    expect(screen.getAllByRole('treeitem').filter(row => row.getAttribute('aria-expanded') === null).map(row => row.textContent)).toEqual([
       expect.stringContaining('two'), expect.stringContaining('one'),
       expect.stringContaining('three'), expect.stringContaining('four'),
     ])
@@ -2215,8 +2221,167 @@ describe('WorkspaceBrowser', () => {
     })
     fireEvent.dragStart(oneAgain, { dataTransfer: dragData() })
     fireDrag(twoAgain, 'drop', 130)
-    expect(b.store.getSnapshot().sessionOrderByAccount.alpha).toEqual(['three', 'two', 'one', 'four'])
+    expect(b.store.getSnapshot().sessionOrderByAccount.alpha).toEqual(['three', 'one', 'four', 'two'])
+    expect(b.store.getSnapshot().sessionOrderByAccount[FLAT_SESSION_ORDER_KEY]).toEqual(['two', 'one', 'three', 'four'])
   })
+
+  it.each(['workspace', 'workspace-tree', 'flat'] as const)('shows global pins once above every folded group in %s mode', (mode) => {
+    createWorkspaceViewStore().create().actions.setGroupBy(mode)
+    const b = mount({
+      useSessions: hook(sessionState([summary('a-pin', 3), summary('b-pin', 2), summary('ordinary', 1)])),
+      useWorkspaces: hook(workspaceState(
+        [workspace('alpha', ['a-pin', 'ordinary']), workspace('beta', ['b-pin'])], [], [sid('a-pin'), sid('b-pin')],
+      )),
+    })
+    const pins = b.view.container.querySelector<HTMLElement>('[data-pinned-section]')!
+    expect(within(pins).getAllByRole('treeitem').map(row => row.querySelector('[class*="title"]')?.textContent))
+      .toEqual(['a-pin', 'b-pin'])
+    expect(screen.getAllByText('a-pin')).toHaveLength(1)
+    expect(screen.getAllByText('b-pin')).toHaveLength(1)
+    expect(screen.getAllByRole('treeitem')[0]).toBe(within(pins).getAllByRole('treeitem')[0])
+    fireEvent.click(screen.getByText('a-pin'))
+    expect(b.props.open).toHaveBeenCalledWith(sid('a-pin'))
+    if (mode !== 'flat') {
+      fireEvent.click(screen.getByText('alpha'))
+      expect(screen.getByText('ordinary')).toBeTruthy()
+      expect(screen.getAllByText('a-pin')).toHaveLength(1)
+    }
+  })
+
+  it('keeps a current global pin visible without implicitly expanding its origin group', () => {
+    const b = mount({
+      useSessions: hook(sessionState([summary('pin', 2), summary('ordinary', 1)], { main: sid('pin') })),
+      useWorkspaces: hook(workspaceState([workspace('alpha', ['pin', 'ordinary'])], [], [sid('pin')])),
+    })
+    expect(screen.getByText('pin')).toBeTruthy()
+    expect(screen.queryByText('ordinary')).toBeNull()
+    expect(b.store.getSnapshot().groupExpansion).not.toHaveProperty('alpha')
+  })
+
+  it('keeps the edited flat slot on unpin while restoring the grouped manual slot', () => {
+    const preferences = createWorkspaceViewStore().create()
+    preferences.actions.setGroupBy('flat')
+    preferences.actions.setGroupExpanded('alpha', true)
+    preferences.actions.setSessionOrder('alpha', ['a', 'pin', 'b'], {})
+    preferences.actions.setSessionOrder(FLAT_SESSION_ORDER_KEY, ['pin', 'a', 'b'], {})
+    const b = mount({
+      useSessions: hook(sessionState([summary('a', 3), summary('pin', 2), summary('b', 1)])),
+      useWorkspaces: hook(workspaceState([workspace('alpha', ['a', 'pin', 'b'])], [], [sid('pin')])),
+    })
+    rerender(b, { useWorkspaces: hook(workspaceState([workspace('alpha', ['a', 'pin', 'b'])])) })
+    const names = () => screen.getAllByRole('treeitem').filter(row => row.getAttribute('aria-expanded') === null)
+      .map(row => row.querySelector('[class*="title"]')?.textContent)
+    expect(names()).toEqual(['pin', 'a', 'b'])
+    act(() => { b.store.actions.setGroupBy('workspace') })
+    expect(names()).toEqual(['a', 'pin', 'b'])
+  })
+
+  it.each(['workspace', 'flat'] as const)('pins through the %s header and waits for the authoritative result', async (mode) => {
+    const preferences = createWorkspaceViewStore().create()
+    preferences.actions.setGroupBy(mode)
+    preferences.actions.setGroupExpanded('alpha', true)
+    const pending = Promise.withResolvers<undefined>()
+    const setSessionPinned = vi.fn(() => pending.promise)
+    const b = mount({
+      setSessionPinned,
+      useSessions: hook(sessionState([summary('ordinary', 1)])),
+      useWorkspaces: hook(workspaceState([workspace('alpha', ['ordinary'])])),
+    })
+    const source = screen.getByText('ordinary').closest('[role="treeitem"]') as HTMLElement
+    const target = b.view.container.querySelector<HTMLElement>('[data-pin-drop-header]')!
+    const unpinTarget = b.view.container.querySelector('[data-pin-drop-group=""]')
+    expect(target).toBeTruthy()
+    if (mode === 'flat') expect(unpinTarget).toBeTruthy()
+    fireEvent.dragStart(source, { dataTransfer: dragData() })
+    expect(b.view.container.querySelector('[data-pin-drop-header]')).toBe(target)
+    expect(b.view.container.querySelector('[data-pin-drop-group=""]')).toBe(unpinTarget)
+    fireDrag(target, 'dragOver', 0)
+    expect(target.className).toContain('pinDropTarget')
+    fireDrag(target, 'drop', 0)
+    expect(setSessionPinned).toHaveBeenCalledExactlyOnceWith(sid('ordinary'), true)
+    expect(source.draggable).toBe(false)
+    expect(b.view.container.querySelector('[data-pinned-section] [data-row-key]')).toBeNull()
+    expect(b.view.container.querySelector('[data-pin-drop-header]')).toBe(target)
+    await act(async () => { pending.resolve(undefined); await pending.promise })
+    expect(source.draggable).toBe(true)
+    rerender(b, { useWorkspaces: hook(workspaceState([workspace('alpha', ['ordinary'])], [], [sid('ordinary')])) })
+    expect(within(b.view.container.querySelector<HTMLElement>('[data-pinned-section]')!).getByText('ordinary')).toBeTruthy()
+  })
+
+  it.each(['workspace', 'flat'] as const)('omits empty pin targets without eligible %s rows', (mode) => {
+    createWorkspaceViewStore().create().actions.setGroupBy(mode)
+    const b = mount({
+      useSessions: hook(sessionState([])),
+      useWorkspaces: hook(workspaceState([])),
+    })
+    expect(b.view.container.querySelector('[data-pin-drop-header]')).toBeNull()
+    rerender(b, { useSessions: hook(sessionState([{ ...summary('blank', 1), blank: true }])) })
+    expect(b.view.container.querySelector('[data-pin-drop-header]')).toBeNull()
+    rerender(b, {
+      useSessions: hook(sessionState([summary('archive', 1)])),
+      useWorkspaces: hook(workspaceState([], [sid('archive')])),
+    })
+    expect(b.view.container.querySelector('[data-pin-drop-header]')).toBeNull()
+  })
+
+  it('settles a pending pin after switching from grouped to flat browsing', async () => {
+    createWorkspaceViewStore().create().actions.setGroupExpanded('alpha', true)
+    const pending = Promise.withResolvers<undefined>()
+    const b = mount({
+      setSessionPinned: vi.fn(() => pending.promise),
+      useSessions: hook(sessionState([summary('ordinary', 1)])),
+      useWorkspaces: hook(workspaceState([workspace('alpha', ['ordinary'])])),
+    })
+    fireEvent.dragStart(screen.getByText('ordinary').closest('[role="treeitem"]')!, { dataTransfer: dragData() })
+    fireDrag(b.view.container.querySelector<HTMLElement>('[data-pin-drop-header]')!, 'drop', 0)
+    act(() => { b.store.actions.setGroupBy('flat') })
+    await act(async () => { pending.resolve(undefined); await pending.promise })
+    rerender(b, { useWorkspaces: hook(workspaceState([workspace('alpha', ['ordinary'])], [], [sid('ordinary')])) })
+    expect(within(b.view.container.querySelector<HTMLElement>('[data-pinned-section]')!).getByText('ordinary')).toBeTruthy()
+    expect(b.props.setSessionPinned).toHaveBeenCalledTimes(1)
+  })
+
+  it('unpins only onto the original group header and clears a cancelled highlight', async () => {
+    const b = mount({
+      useSessions: hook(sessionState([summary('pin', 1)])),
+      useWorkspaces: hook(workspaceState([workspace('alpha', ['pin']), workspace('beta', [])], [], [sid('pin')])),
+    })
+    const source = screen.getByText('pin').closest('[role="treeitem"]') as HTMLElement
+    const alpha = b.view.container.querySelector<HTMLElement>('[data-pin-drop-group="alpha"]')!
+    const beta = b.view.container.querySelector<HTMLElement>('[data-pin-drop-group="beta"]')!
+    fireEvent.dragStart(source, { dataTransfer: dragData() })
+    fireDrag(beta, 'drop', 0)
+    expect(b.props.setSessionPinned).not.toHaveBeenCalled()
+    fireDrag(alpha, 'dragOver', 0)
+    expect(alpha.className).toContain('pinDropTarget')
+    fireEvent.dragEnd(source)
+    expect(alpha.className).not.toContain('pinDropTarget')
+    fireEvent.dragStart(source, { dataTransfer: dragData() })
+    await act(async () => { fireDrag(alpha, 'drop', 0) })
+    expect(b.props.setSessionPinned).toHaveBeenCalledExactlyOnceWith(sid('pin'), false)
+    expect(b.props.insertWorkspaceBefore).not.toHaveBeenCalled()
+  })
+
+  it.each(['archived', 'unpinned', 'missing', 'subagent', 'pending', 'loading'] as const)(
+    'ignores header drops when a pin becomes %s during the drag', (change) => {
+      const workspaces = [workspace('alpha', ['pin'])]
+      const b = mount({
+        useSessions: hook(sessionState([summary('pin', 1)])),
+        useWorkspaces: hook(workspaceState(workspaces, [], [sid('pin')])),
+      })
+      fireEvent.dragStart(screen.getByText('pin').closest('[role="treeitem"]')!, { dataTransfer: dragData() })
+      rerender(b, {
+        useSessions: hook(sessionState(change === 'missing' ? [] : [summary('pin', 1, change === 'subagent' ? { origin: 'subagent' } : {})])),
+        useWorkspaces: hook({
+          ...workspaceState(workspaces, change === 'archived' ? [sid('pin')] : [], change === 'unpinned' ? [] : [sid('pin')]),
+          phase: change === 'pending' ? 'pending' : 'ready',
+          state: change === 'loading' ? 'loading' : 'idle',
+        }),
+      })
+      fireDrag(b.view.container.querySelector<HTMLElement>('[data-pin-drop-group="alpha"]')!, 'drop', 0)
+      expect(b.props.setSessionPinned).not.toHaveBeenCalled()
+    },
+  )
 
   it('keeps pinned and unpinned rows in separate drag domains', () => {
     const sessions = sessionState([summary('one', 2), summary('two', 1)])

@@ -120,7 +120,9 @@ export function createWorkspaceViewStore(): EngineStoreHandle<WorkspaceViewState
       pinSessionOrder: (d, sessionId, accountKeys, source) => {
         const selected = new Set(accountKeys)
         d.sessionOrderByAccount = Object.fromEntries(Object.entries(source.members).map(([key, members]) => {
-          const order = reconcileManualOrder(members, d.sessionOrderByAccount[key], source.summaries, source.rowState)
+          const order = reconcileManualOrder(members, d.sessionOrderByAccount[key], source.summaries, {
+            ...source.rowState, pinnedSessionIds: key === FLAT_SESSION_ORDER_KEY ? source.rowState.pinnedSessionIds : [],
+          })
           return [key, selected.has(key) ? [sessionId, ...order.filter(id => id !== sessionId)] : order]
         }))
       },

@@ -109,7 +109,7 @@ describe('owningGroupKey', () => {
 })
 
 describe('Session ordering', () => {
-  it.each(['workspace', 'ungrouped', 'flat'] as const)('keeps the current New Session before pins in %s', (mode) => {
+  it.each(['workspace', 'ungrouped', 'flat'] as const)('keeps the current New Session first in the ordinary %s rows', (mode) => {
     const sessions = withMain(list(
       summary('pin', 30),
       summary('ordinary', 20),
@@ -126,7 +126,9 @@ describe('Session ordering', () => {
         noAttention,
         view([mode === 'workspace' ? 'alpha' : UNGROUPED_KEY], order),
       )[0]!.sessions
-    expect(rows.map(row => row.id)).toEqual([sid('blank'), sid('pin'), sid('ordinary')])
+    expect(rows.map(row => row.id)).toEqual(mode === 'flat'
+      ? [sid('blank'), sid('pin'), sid('ordinary')]
+      : [sid('blank'), sid('ordinary')])
   })
 
   it('orders known members by recency with a stable identity tie-break', () => {
@@ -229,7 +231,9 @@ describe('Session ordering', () => {
         sessions, mode === 'workspace' ? [workspace('alpha', order)] : [], state, noAttention,
         view([mode === 'workspace' ? 'alpha' : UNGROUPED_KEY], order),
       )[0]!.sessions
-    expect(rows.map(row => row.id)).toEqual(['source', 'other-pin', 'ordinary', 'fork'])
+    expect(rows.map(row => row.id)).toEqual(mode === 'flat'
+      ? ['source', 'other-pin', 'ordinary', 'fork']
+      : ['ordinary', 'fork'])
   })
 
   it('keeps archive filtering out of complete flat membership', () => {
@@ -487,18 +491,15 @@ describe('deriveGroups', () => {
     expect(groups[0]!.sessionCount).toBe(1)
   })
 
-  it('leads expanded groups with pinned rows in the supplied order', () => {
+  it('omits global pins from expanded groups without changing their membership count', () => {
     const sessions = list(summary('a', 4), summary('b', 3), summary('c', 2), summary('d', 1))
     const groups = deriveGroups(
       sessions, [workspace('first', ['a', 'c', 'b', 'd'])],
       rowState({ pinned: ['c', 'b'] }),
       noAttention, view(['first']),
     )
-    // c precedes b per the supplied order even though b updated more recently:
-    // the pinned block never re-sorts, so manual pinned-to-pinned drags hold.
+    expect(groups[0]!.sessionCount).toBe(4)
     expect(groups[0]!.sessions.map(node => [node.id, node.pinned])).toEqual([
-      [sid('c'), true],
-      [sid('b'), true],
       [sid('a'), false],
       [sid('d'), false],
     ])

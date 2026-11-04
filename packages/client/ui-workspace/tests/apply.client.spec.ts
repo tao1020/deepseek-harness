@@ -460,7 +460,7 @@ describe('ui-workspace apply', () => {
     expect(archive.hooks.archived.getSnapshot()).toEqual(new Set())
   })
 
-  it('pins through the navigation service, which fronts the Session in its group and the flat list of the browser view', async () => {
+  it('pins through navigation into the global flat order without moving the group slot', async () => {
     const b = await bench()
     b.setWorkspaces(workspaceState([workspace('alpha', ['one', 'two', 'three'])]))
     b.setSessions(sessionState([summary('one', 3), summary('two', 2), summary('three', 1)]))
@@ -475,7 +475,7 @@ describe('ui-workspace apply', () => {
     expect(b.pinSession).toHaveBeenCalledWith('three')
     await vi.waitFor(() => {
       expect(view.getSnapshot().sessionOrderByAccount).toEqual({
-        alpha: ['three', 'one', 'two'],
+        alpha: ['one', 'two', 'three'],
         [UNGROUPED_KEY]: [],
         [FLAT_SESSION_ORDER_KEY]: ['three', 'one', 'two'],
       })
@@ -489,7 +489,8 @@ describe('ui-workspace apply', () => {
     pinButton.pinSession(sid('one'))
     expect(b.pinSession).toHaveBeenLastCalledWith('one')
     await vi.waitFor(() => {
-      expect(view.getSnapshot().sessionOrderByAccount.alpha).toEqual(['one', 'three', 'two'])
+      expect(view.getSnapshot().sessionOrderByAccount.alpha).toEqual(['one', 'two', 'three'])
+      expect(view.getSnapshot().sessionOrderByAccount[FLAT_SESSION_ORDER_KEY]).toEqual(['one', 'three', 'two'])
     })
 
     // Unpin leaves the saved orders as they are.
@@ -499,6 +500,55 @@ describe('ui-workspace apply', () => {
     await settled()
     expect(view.getSnapshot().sessionOrderByAccount).toBe(before)
     expect(toast.hooks.toast.getSnapshot()).toBeNull()
+  })
+
+  it('awaits header pin requests, reports rejection, and leaves saved orders unchanged', async () => {
+    const b = await bench()
+    b.setWorkspaces(workspaceState([workspace('alpha', ['one'])]))
+    b.setSessions(sessionState([summary('one', 1)]))
+    declare(b.slots, 'sidebar.workspaces', 'shell.overlay')
+    await b.ctx.plugin({ inject: [...inject], apply }).await()
+    const browser = faceOf(b.slots.entries('sidebar.workspaces')[0]!) as WorkspaceBrowserInjected
+    const toast = faceOf(entry(b.slots, 'shell.overlay', 'workspace.row-toast')) as RowToastInjected
+    const view = viewInstance(b.slots)
+    const pending = Promise.withResolvers<undefined>()
+    b.pinSession.mockReturnValueOnce(pending.promise)
+    const result = browser.setSessionPinned(sid('one'), true)
+    const remountedBrowser = faceOf(b.slots.entries('sidebar.workspaces')[0]!) as WorkspaceBrowserInjected
+    await remountedBrowser.setSessionPinned(sid('one'), true)
+    expect(b.pinSession).toHaveBeenCalledExactlyOnceWith(sid('one'))
+    expect(view.getSnapshot().sessionOrderByAccount).toEqual({})
+    pending.reject(new Error('pin unavailable'))
+    await expect(result).resolves.toBeUndefined()
+    expect(toast.hooks.toast.getSnapshot()?.kind).toBe('pinFailed')
+    expect(view.getSnapshot().sessionOrderByAccount).toEqual({})
+    b.setWorkspaces(workspaceState([workspace('alpha', ['one'])], [], [sid('one')]))
+    b.unpinSession.mockRejectedValueOnce(new Error('unpin unavailable'))
+    await expect(browser.setSessionPinned(sid('one'), false)).resolves.toBeUndefined()
+    expect(toast.hooks.toast.getSnapshot()?.kind).toBe('unpinFailed')
+  })
+
+  it('rechecks readiness, pin membership, and permission before header requests', async () => {
+    const b = await bench()
+    b.setSessions(sessionState([summary('one', 1)]))
+    declare(b.slots, 'sidebar.workspaces')
+    await b.ctx.plugin({ inject: [...inject], apply }).await()
+    const browser = faceOf(b.slots.entries('sidebar.workspaces')[0]!) as WorkspaceBrowserInjected
+    b.setWorkspaces(workspaceState([], [], [sid('one')]))
+    await browser.setSessionPinned(sid('one'), true)
+    b.setWorkspaces(workspaceState([], [sid('one')]))
+    await browser.setSessionPinned(sid('one'), true)
+    b.setWorkspaces({ ...workspaceState([]), phase: 'pending' })
+    await browser.setSessionPinned(sid('one'), true)
+    b.setWorkspaces({ ...workspaceState([]), state: 'loading' })
+    await browser.setSessionPinned(sid('one'), true)
+    b.setWorkspaces(workspaceState([]))
+    await browser.setSessionPinned(sid('missing'), true)
+    b.accessSource.mockReturnValue(createSnapshotStore(false))
+    await browser.setSessionPinned(sid('one'), true)
+    expect(b.pinSession).not.toHaveBeenCalled()
+    expect(b.unpinSession).not.toHaveBeenCalled()
+    expect(b.accessSource).toHaveBeenLastCalledWith('session', sid('one'), 'workspace/pinSession')
   })
 
   it('raises the pin and unpin failure notices and writes no order', async () => {

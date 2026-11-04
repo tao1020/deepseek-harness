@@ -1,4 +1,5 @@
 - tree "Sessions":
+  - group "Pinned"
   - treeitem "{{workspace}}" [expanded]
   - treeitem "Newest conversation now" [selected]
   - treeitem "Middle conversation 1min"

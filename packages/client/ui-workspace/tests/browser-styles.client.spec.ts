@@ -90,6 +90,12 @@ describe('WorkspaceBrowser.module.css list', () => {
     expect(declarations('.searchExpanded')?.get('margin-inline')).toBe('0')
   })
 
+  it('left-aligns pin section headers independently of the trailing toolbar actions', () => {
+    expect(declarations('.pinSectionHeader')?.get('justify-content')).toBe('flex-start')
+    expect(declarations('.pinSectionHeader')?.get('padding-inline')).toBe('var(--dsh-sidebar-row-padding)')
+    expect(declarations('.sectionHeader')?.get('justify-content')).toBe('flex-end')
+  })
+
   it('keeps 2px between rows and 4px between workspace groups', () => {
     expect(declarations('.flatList > * + *')?.get('margin-top')).toBe('2px')
     expect(declarations(".searchTree > [role='treeitem'] + [role='treeitem']")?.get('margin-top')).toBe('2px')

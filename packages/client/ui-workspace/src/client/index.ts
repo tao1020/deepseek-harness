@@ -287,6 +287,7 @@ export function apply(ctx: Context): void {
       ? [{ id: 'delete', label: ctx.locale.bind(NS)('delete.workspace'), icon: { key: 'workspace.delete' }, danger: true, separatorBefore: true,
         run: () => { requestWorkspaceAction(workspaceId, displayTitle, 'delete') } }] : [],
   }), 'workspace: delete menu action')
+  const pendingPinDrops = new Set<SessionId>()
   const browserInjected = (): WorkspaceBrowserInjected => ({
     openWorkspaceMenu: (workspaceId, path, displayTitle, point, mode) => {
       const target = ctx.contextMenus.active.getSnapshot()
@@ -311,6 +312,25 @@ export function apply(ctx: Context): void {
     deleteWorkspace: async (workspaceId) => { await workspaces.delete(workspaceId) },
     insertWorkspaceBefore: async (workspaceId, beforeWorkspaceId) => {
       await workspaces.insertBefore(workspaceId, beforeWorkspaceId)
+    },
+    setSessionPinned: async (sessionId, pinned) => {
+      const snapshot = workspaces.list.getSnapshot()
+      const list = sessions.list.getSnapshot()
+      const session = list.byId[sessionId]
+      if (pendingPinDrops.has(sessionId) || snapshot.phase !== 'ready' || snapshot.state === 'loading' || list.phase !== 'ready'
+        || session === undefined || session.blank || session.origin === 'subagent' || snapshot.archivedSessionIds.includes(sessionId)
+        || snapshot.pinnedSessionIds.includes(sessionId) === pinned) return
+      const method = pinned ? 'workspace/pinSession' : 'workspace/unpinSession'
+      if (!ctx.remoteAccess.source('session', sessionId, method).getSnapshot()) return
+      pendingPinDrops.add(sessionId)
+      try {
+        if (pinned) await uiWorkspace.pinSession(sessionId)
+        else await uiWorkspace.unpinSession(sessionId)
+      } catch {
+        notify({ kind: pinned ? 'pinFailed' : 'unpinFailed' })
+      } finally {
+        pendingPinDrops.delete(sessionId)
+      }
     },
     unarchiveSession: async (sessionId) => { await uiWorkspace.unarchiveSession(sessionId) },
     createWorkspace: input => workspaces.create(input),

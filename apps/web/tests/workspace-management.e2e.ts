@@ -508,8 +508,8 @@ describe('web e2e: workspace management (create / rename / grouping / hover affo
    * @returns the session row locator, already present.
    */
   async function seededSessionRow(target = page) {
-    const ungroupedRow = target.getByText('Ungrouped', { exact: true }).locator('..').locator('..')
-    const ungroupedSection = ungroupedRow.locator('..')
+    const ungroupedRow = target.getByText('Ungrouped', { exact: true }).locator('xpath=ancestor::*[@role="treeitem"][1]')
+    const ungroupedSection = ungroupedRow.locator('xpath=ancestor::*[contains(@class, "groupSection")][1]')
     // Initial-current auto-expansion can race this gesture; converge on
     // expanded rather than assuming which update wins first.
     await expect.poll(async () => {
@@ -850,7 +850,8 @@ describe('web e2e: workspace management (create / rename / grouping / hover affo
     })
     await expect.poll(() => sessionRow.count(), { timeout: 10_000 }).toBe(1)
     await expect.poll(() => sessionRow.getAttribute('aria-selected'), { timeout: 10_000 }).toBe('true')
-    const ungroupedSection = page.getByText('Ungrouped', { exact: true }).locator('..').locator('..').locator('..')
+    const ungroupedSection = page.getByText('Ungrouped', { exact: true })
+      .locator('xpath=ancestor::*[contains(@class, "groupSection")][1]')
     await expect.poll(() => ungroupedSection.locator('[role="treeitem"]').count(), { timeout: 10_000 }).toBe(2)
     // Row menu: hover reveals the actions button; Archive session commits
     // without a confirmation dialog (non-destructive: log + accounting stay).
